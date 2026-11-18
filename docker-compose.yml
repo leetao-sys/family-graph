@@ -1,0 +1,70 @@
+# 从源代码构建并运行。只想在服务器 / NAS 上拉取现成镜像运行，请用 deploy/docker-compose.yml。
+name: family-graph
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: family
+      POSTGRES_USER: family
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?请在 .env 中设置 DB_PASSWORD}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U family -d family"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build: ./backend
+    image: ${IMAGE_REPO:-family-graph}:backend-${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://family:${DB_PASSWORD}@db:5432/family
+      SECRET_KEY: ${SECRET_KEY:?请在 .env 中设置 SECRET_KEY}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 .env 中设置 ADMIN_PASSWORD}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      TOKEN_HOURS: ${TOKEN_HOURS:-12}
+      MEDIA_DIR: /data/media
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-5}
+    volumes:
+      - media:/data/media
+
+  web:
+    build: ./frontend
+    image: ${IMAGE_REPO:-family-graph}:web-${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${WEB_PORT:-8080}:80"
+
+  # 每日自动备份数据库与头像，保留 BACKUP_KEEP_DAYS 天
+  backup:
+    build: ./scripts
+    image: ${IMAGE_REPO:-family-graph}:backup-${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGUSER: family
+      PGPASSWORD: ${DB_PASSWORD}
+      PGDATABASE: family
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      BACKUP_HOUR: ${BACKUP_HOUR:-3}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - media:/data/media:ro
+      - ${BACKUP_DIR:-./backups}:/backups
+
+volumes:
+  db-data:
+  media:

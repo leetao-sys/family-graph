@@ -1,0 +1,7 @@
+/* 纸谱 · 墨线 — 样式入口
+   视觉系统：宣纸底、墨线、朱砂印；左侧谱签 + 顶部横幅 + 谱系桌面。 */
+@import "./styles/base.css";
+@import "./styles/shell.css";
+@import "./styles/ui.css";
+@import "./styles/pages.css";
+@import "./styles/atlas.css";

@@ -1,0 +1,118 @@
+# 家族关系图谱 —— NAS / 服务器部署文件
+#
+# 只拉取 Docker Hub 上的现成镜像，不需要源代码。本目录中需要两个文件：
+#   docker-compose.yml   本文件
+#   .env                 由 .env.example 复制并修改
+#
+# 首次部署：
+#   docker compose pull
+#   docker compose up -d
+#   浏览器打开 http://NAS的IP:8080
+#
+# 升级：
+#   docker compose pull && docker compose up -d
+#
+# 群晖 Container Manager：项目 → 新增 → 选择本文件所在文件夹
+# 威联通 Container Station：应用程序 → 创建 → 使用 YAML
+#
+# 镜像支持 linux/amd64 与 linux/arm64（64 位 x86 / ARM NAS）。
+name: family-graph
+
+# 限制每个容器的日志大小，避免长期运行把 NAS 磁盘写满
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      POSTGRES_DB: family
+      POSTGRES_USER: family
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?请先在 .env 中设置 DB_PASSWORD}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U family -d family"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    logging: *default-logging
+
+  backend:
+    image: ${IMAGE_REPO:-leetaooooo/family-graph}:backend-${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # DB_PASSWORD 会拼进连接串，只能使用字母、数字、- 和 _（用 README 里的 token_urlsafe 生成即可）
+      DATABASE_URL: postgresql+psycopg://family:${DB_PASSWORD}@db:5432/family
+      SECRET_KEY: ${SECRET_KEY:?请先在 .env 中设置 SECRET_KEY}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请先在 .env 中设置 ADMIN_PASSWORD}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      TOKEN_HOURS: ${TOKEN_HOURS:-12}
+      MEDIA_DIR: /data/media
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-5}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - media:/data/media
+    # 健康检查会查询数据库；启动时先执行迁移，慢速 NAS 给 90 秒预热时间
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    logging: *default-logging
+
+  web:
+    image: ${IMAGE_REPO:-leetaooooo/family-graph}:web-${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *default-logging
+
+  # 每天 BACKUP_HOUR 点把数据库与头像备份到 BACKUP_DIR，保留 BACKUP_KEEP_DAYS 天
+  backup:
+    image: ${IMAGE_REPO:-leetaooooo/family-graph}:backup-${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      # 等后端完成数据库迁移后再开始，避免首次启动时备份到迁移中的库
+      backend:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGUSER: family
+      PGPASSWORD: ${DB_PASSWORD}
+      PGDATABASE: family
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      BACKUP_HOUR: ${BACKUP_HOUR:-3}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - media:/data/media:ro
+      - ${BACKUP_DIR:-./backups}:/backups
+    logging: *default-logging
+
+# 数据库与头像放在 Docker 卷里，由 Docker 管理权限，避免 NAS 共享文件夹的权限问题；
+# 备份文件写到 BACKUP_DIR（默认是本目录下的 backups），可直接在 NAS 文件管理器中看到。
+volumes:
+  db-data:
+  media:
